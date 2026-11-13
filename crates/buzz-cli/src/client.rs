@@ -1221,15 +1221,13 @@ impl BuzzClient {
             .map(|t| t.mime_type().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
-
-        // 3. Size check
-        let max = if mime.starts_with("video/") {
+        // 3. Match relay size defaults; acceptance remains the relay's decision.
+        let max = if mime == "video/mp4" {
             MAX_VIDEO_BYTES
-        } else {
+        } else if ALLOWED_MIMES.contains(&mime.as_str()) {
             MAX_IMAGE_BYTES
+        } else {
+            100 * 1024 * 1024
         };
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(

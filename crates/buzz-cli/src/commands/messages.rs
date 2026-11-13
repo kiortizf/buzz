@@ -618,18 +618,13 @@ pub async fn cmd_send_message(
     let mut media_tags: Vec<Vec<String>> = Vec::new();
     let mut media_content = String::new();
     for file_path in &p.files {
-        let desc = client
-            .upload_file(file_path)
-            .await
-            .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
-        media_tags.push(crate::client::build_imeta_tag(&desc));
-        if desc.mime_type.starts_with("video/") {
-            media_content.push_str("\n![video](");
-        } else {
-            media_content.push_str("\n![image](");
-        }
-        media_content.push_str(&desc.url);
-        media_content.push(')');
+        let desc = client.upload_file(file_path).await?;
+        let name = attachment_name(file_path);
+        let mut tag = crate::client::build_imeta_tag(&desc);
+        tag.push(format!("filename {name}"));
+        media_tags.push(tag);
+        media_content.push('\n');
+        media_content.push_str(&attachment_markdown(&name, &desc));
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
@@ -1048,8 +1043,82 @@ pub async fn dispatch(
     }
 }
 
+/// Basename metadata, sanitized and capped as in upstream b329e05c5.
+fn attachment_name(file_path: &str) -> String {
+    let base = std::path::Path::new(file_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut name = String::new();
+    for c in base.chars() {
+        let c = if c.is_control() || c == '/' || c == '\\' {
+            ' '
+        } else {
+            c
+        };
+        if name.len() + c.len_utf8() > 255 {
+            break;
+        }
+        name.push(c);
+    }
+    match name.trim() {
+        "" => "File".to_string(),
+        trimmed => trimmed.to_string(),
+    }
+}
+
+/// Keep image/video embeds; documents are native download links.
+fn attachment_markdown(name: &str, desc: &crate::client::BlobDescriptor) -> String {
+    let mut label = String::new();
+    for c in name.chars() {
+        if "\\`*_{}[]()!<>&".contains(c) {
+            label.push('\\');
+        }
+        label.push(c);
+    }
+    let embed = matches!(
+        desc.mime_type.as_str(),
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "video/mp4"
+    );
+    format!("{}[{label}](<{}>)", if embed { "!" } else { "" }, desc.url)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn attachments_embed_media_and_link_other_files() {
+        use super::{attachment_markdown, attachment_name};
+        let blob = |mime: &str| crate::client::BlobDescriptor {
+            url: "https://r.example/media/x.bin".into(),
+            sha256: "x".into(),
+            size: 1,
+            mime_type: mime.into(),
+            uploaded: 0,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+        };
+        for mime in [
+            "application/octet-stream",
+            "application/pdf",
+            "application/zip",
+        ] {
+            assert_eq!(
+                attachment_markdown("notes [v1].md", &blob(mime)),
+                "[notes \\[v1\\].md](<https://r.example/media/x.bin>)"
+            );
+        }
+        assert_eq!(
+            attachment_markdown("a.png", &blob("image/png")),
+            "![a.png](<https://r.example/media/x.bin>)"
+        );
+        assert_eq!(attachment_name("/fixture/report.pdf"), "report.pdf");
+        assert_eq!(attachment_name("/fixture/a\nb.txt"), "a b.txt");
+        assert_eq!(attachment_name("/"), "File");
+        assert!(attachment_name(&"é".repeat(256)).len() <= 255);
+    }
+
     use super::{
         channel_id_from_event, cmd_get_thread, cmd_send_message, event_mention_pubkeys,
         find_root_from_tags, match_profiles_by_name, merge_message_mentions, missing_members,
