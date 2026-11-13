@@ -69,6 +69,81 @@ const ALLOWED_MIMES: &[&str] = &[
     "video/mp4",
 ];
 
+/// Narrow fleet document repair. Preserve the existing media path and leave
+/// every other previously unsupported type blocked locally. Relay magic-byte
+/// validation and authenticated attachment-only serving remain authoritative.
+fn supported_upload(mime: &str, file_path: &str, bytes: &[u8]) -> bool {
+    ALLOWED_MIMES.contains(&mime)
+        || matches!(mime, "application/pdf" | "application/zip")
+        || (mime == "application/octet-stream"
+            && std::path::Path::new(file_path)
+                .extension()
+                .is_some_and(|e| e == "md")
+            && std::str::from_utf8(bytes).is_ok()
+            && !bytes.contains(&0))
+}
+
+#[cfg(test)]
+mod fleet_upload_tests {
+    use super::supported_upload;
+    #[test]
+    fn only_requested_documents_and_existing_media_are_supported() {
+        for (mime, path, bytes, expected) in [
+            (
+                "application/octet-stream",
+                "notes.md",
+                b"# Notes\n".as_slice(),
+                true,
+            ),
+            (
+                "application/pdf",
+                "review.pdf",
+                b"%PDF-1.7".as_slice(),
+                true,
+            ),
+            (
+                "application/zip",
+                "evidence.zip",
+                b"PK\x03\x04".as_slice(),
+                true,
+            ),
+            ("image/png", "image.png", b"PNG".as_slice(), true),
+            ("text/xml", "active.svg", b"<svg/>".as_slice(), false),
+            (
+                "application/octet-stream",
+                "active.js",
+                b"alert(1)".as_slice(),
+                false,
+            ),
+            (
+                "application/x-executable",
+                "file.md",
+                b"ELF".as_slice(),
+                false,
+            ),
+            (
+                "application/octet-stream",
+                "binary.md",
+                b"\0".as_slice(),
+                false,
+            ),
+            (
+                "application/octet-stream",
+                "binary.md",
+                b"\xff".as_slice(),
+                false,
+            ),
+            ("text/html", "file.md", b"<html/>".as_slice(), false),
+        ] {
+            assert_eq!(
+                supported_upload(mime, path, bytes),
+                expected,
+                "{mime} {path}"
+            );
+        }
+    }
+}
+
 /// Maximum file size for image uploads (50 MB).
 const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -1220,6 +1295,10 @@ impl BuzzClient {
         let mime = infer::get(&bytes)
             .map(|t| t.mime_type().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
+
+        if !supported_upload(&mime, file_path, &bytes) {
+            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
+        }
 
         // 3. Match relay size defaults; acceptance remains the relay's decision.
         let max = if mime == "video/mp4" {
